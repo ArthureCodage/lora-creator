@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoRA Creator</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">◆</span> LoRA Creator</div>
+  <nav>
+    <button class="tab active" data-view="new">Nouveau LoRA</button>
+    <button class="tab" data-view="train">Entraînement <span id="tab-dot" class="dot hidden"></span></button>
+    <button class="tab" data-view="history">Historique</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ============================================================ NOUVEAU -->
+  <section id="view-new" class="view">
+    <div class="card">
+      <h2><span class="num">1</span> Le LoRA</h2>
+      <div class="row">
+        <label class="field grow">Nom
+          <input id="f-name" placeholder="ex. Marie, Aquarelle douce, Veste rouge…" autocomplete="off">
+        </label>
+        <label class="field grow">Mot-clé déclencheur
+          <input id="f-trigger" placeholder="généré depuis le nom" autocomplete="off">
+          <small>Ajouté automatiquement au début de chaque légende.</small>
+        </label>
+        <div class="field">Type
+          <button id="f-type" class="chip big" title="Changer le type"></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="num">2</span> Les images
+        <span class="h-right">
+          <select id="f-dataset"></select>
+        </span>
+      </h2>
+      <div id="drop" class="drop">
+        <input id="file-input" type="file" multiple accept="image/*" hidden>
+        <p><b>Glisse tes images ici</b> ou <a href="#" id="pick-files">choisis-les</a></p>
+        <div class="row center">
+          <input id="import-path" placeholder="…ou colle le chemin d'un dossier (ex. S:\Photos\Marie)">
+          <button id="import-btn" class="btn">Importer</button>
+        </div>
+        <small>Les images sont redressées, converties et réduites si besoin. Les doublons sont ignorés.
+          Pas besoin de recadrer : kohya range chaque image dans le bon format (bucketing).</small>
+      </div>
+
+      <div id="ds-tools" class="toolbar hidden">
+        <span id="ds-count" class="muted"></span>
+        <span class="spacer"></span>
+        <select id="tag-method" title="Méthode de légende">
+          <option value="wd14">Tags (WD14) — anime & général</option>
+          <option value="blip">Phrases (BLIP) — photos</option>
+        </select>
+        <label class="check"><input type="checkbox" id="tag-overwrite"> remplacer l'existant</label>
+        <button id="autotag-btn" class="btn">✦ Légendes auto</button>
+      </div>
+      <div id="tag-progress" class="inline-progress hidden"><div class="bar"><i></i></div><span></span></div>
+      <div id="ds-tools2" class="toolbar hidden">
+        <input id="rm-tag" placeholder="tag à retirer de toutes les légendes (ex. blue eyes)">
+        <button id="rm-tag-btn" class="btn ghost">Retirer partout</button>
+        <span class="spacer"></span>
+        <small class="muted" id="save-state"></small>
+      </div>
+      <div id="grid" class="grid"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="num">3</span> Modèle de base</h2>
+      <div id="models"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="num">4</span> Qualité</h2>
+      <div class="seg" id="quality">
+        <button data-q="rapide">Rapide<small>pour tester</small></button>
+        <button data-q="equilibre" class="on">Équilibré<small>le bon compromis</small></button>
+        <button data-q="qualite">Qualité<small>plus long, plus fin</small></button>
+      </div>
+
+      <details id="advanced">
+        <summary>Réglages avancés <small class="muted">— laisse vide pour garder la valeur conseillée</small></summary>
+        <div class="adv-grid">
+          <label class="field">Epochs<input data-adv="epochs" type="number" min="1" max="100"></label>
+          <label class="field">Répétitions<input data-adv="repeats" type="number" min="1" max="100"><small>auto si vide</small></label>
+          <label class="field">Dimension (rank)<input data-adv="dim" type="number" min="1" max="256"></label>
+          <label class="field">Alpha<input data-adv="alpha" type="number" min="1" max="256"></label>
+          <label class="field">LR U-Net<input data-adv="unet_lr" type="text"></label>
+          <label class="field" id="te-field">LR text encoder<input data-adv="te_lr" type="text"><small>0 = désactivé</small></label>
+          <label class="field">Résolution
+            <select data-adv="resolution" id="res-select"></select>
+          </label>
+          <label class="field">Seed<input data-adv="seed" type="number"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="opt-samples" checked> Générer des images de test pendant l'entraînement</label>
+        <label class="field">Prompts de test <small>(un par ligne ; vide = automatique)</small>
+          <textarea id="opt-prompts" rows="3" placeholder="automatique selon le type et le mot-clé"></textarea>
+        </label>
+      </details>
+      <label class="check"><input type="checkbox" id="opt-forge" checked> Copier le LoRA fini dans Forge Neo (avec aperçu et mot-clé)</label>
+    </div>
+
+    <div class="launch">
+      <div id="summary" class="summary"></div>
+      <button id="launch-btn" class="btn primary big">Lancer l'entraînement</button>
+    </div>
+  </section>
+
+  <!-- ============================================================ ENTRAINEMENT -->
+  <section id="view-train" class="view hidden">
+    <div id="train-empty" class="card empty">Aucun entraînement en cours. <a href="#" data-goto="new">Créer un LoRA</a></div>
+    <div id="train-panel" class="hidden">
+      <div class="card">
+        <div class="train-head">
+          <div>
+            <h2 id="t-name"></h2>
+            <div class="muted" id="t-sub"></div>
+          </div>
+          <div class="row">
+            <button id="t-folder" class="btn ghost">Ouvrir le dossier</button>
+            <button id="t-cancel" class="btn danger">Arrêter</button>
+          </div>
+        </div>
+        <div class="phase" id="t-phase"></div>
+        <div class="bigbar"><i id="t-bar"></i></div>
+        <div class="stats">
+          <div><b id="t-step">–</b><span>pas</span></div>
+          <div><b id="t-epoch">–</b><span>epoch</span></div>
+          <div><b id="t-elapsed">–</b><span>écoulé</span></div>
+          <div><b id="t-eta">–</b><span>restant</span></div>
+          <div><b id="t-rate">–</b><span>s / pas</span></div>
+          <div><b id="t-loss">–</b><span>loss</span></div>
+        </div>
+        <div id="t-error" class="error hidden"></div>
+      </div>
+      <div class="card">
+        <h2>Images de test</h2>
+        <div id="t-samples" class="samples"><span class="muted">Elles apparaîtront à chaque sauvegarde.</span></div>
+      </div>
+      <div class="card" id="t-files-card">
+        <h2>Fichiers LoRA</h2>
+        <div id="t-files"></div>
+      </div>
+      <details class="card">
+        <summary>Journal de kohya</summary>
+        <pre id="t-log"></pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- ============================================================ HISTORIQUE -->
+  <section id="view-history" class="view hidden">
+    <div class="row hist-actions">
+      <button class="btn ghost" data-open="lora">Ouvrir mes LoRA</button>
+      <button class="btn ghost" data-open="forge">Ouvrir le dossier LoRA de Forge</button>
+    </div>
+    <div id="history"></div>
+  </section>
+</main>
+
+<!-- popup type -->
+<div id="type-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Quel genre de LoRA ?</h2>
+    <div class="type-cards">
+      <button data-type="personnage"><span class="ico">☺</span><b>Personnage / personne</b><small>un visage, un personnage précis</small></button>
+      <button data-type="style"><span class="ico">✎</span><b>Style artistique</b><small>un rendu, une technique, une ambiance</small></button>
+      <button data-type="objet"><span class="ico">◈</span><b>Objet / concept</b><small>un vêtement, un objet, une pose, un lieu</small></button>
+    </div>
+  </div>
+</div>
+
+<div id="lightbox" class="modal hidden"><img alt=""></div>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

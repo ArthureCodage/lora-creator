@@ -1,0 +1,11 @@
+{
+  "kohya_dir": "%USERPROFILE%\\kohya_ss",
+  "data_dir": "C:\\LoRA_Creator",
+  "forge_lora_dir": "%USERPROFILE%\\stable-diffusion-webui-forge\\models\\Lora",
+  "model_dirs": [
+    "%USERPROFILE%\\stable-diffusion-webui-forge\\models\\Stable-diffusion",
+    "%USERPROFILE%\\Downloads"
+  ],
+  "port": 7870,
+  "tagger_repo": "SmilingWolf/wd-swinv2-tagger-v3"
+}

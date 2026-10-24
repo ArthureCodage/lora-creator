@@ -1,0 +1,8 @@
+# Config locale (chemins propres à chaque machine) — voir config.example.json
+config.json
+
+# Python / éditeurs
+__pycache__/
+*.pyc
+.claude/
+.vscode/
