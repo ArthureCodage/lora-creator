@@ -8,7 +8,6 @@ const S = {
 };
 const QLABEL = { rapide: "Rapide", equilibre: "Équilibré", qualite: "Qualité" };
 const FAMLABEL = { sd15: "SD 1.5", sdxl: "SDXL / Pony" };
-const RES = { sd15: [512, 640, 768], sdxl: [768, 896, 1024] };
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem("lc_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -266,7 +265,9 @@ function renderModels() {
           <span class="badge ${fam === "sdxl" ? "xl" : ""}">${FAMLABEL[fam]}</span>${m.pony ? '<span class="badge xl">Pony</span>' : ""}
           <span class="badge">${m.size_gb} Go</span><span class="badge">${esc(m.folder)}</span>
         </button>`).join("")}</div>
-      ${fam === "sdxl" ? `<div class="note">SDXL sur 6 Go : ça marche (~4,5 s par pas), mais c'est lent. Images de test désactivées par défaut : environ 9 min chacune.</div>` : ""}
+      ${fam === "sdxl" ? (S.profile === "big"
+        ? `<div class="note ok">Gros GPU : SDXL en bf16, 2 images à la fois, images de test activées.</div>`
+        : `<div class="note">SDXL sur 6 Go : ça marche (~4,5 s par pas), mais c'est lent. Images de test désactivées par défaut : environ 9 min chacune.</div>`) : ""}
     </div>`;
   }).join("");
 }
@@ -303,7 +304,7 @@ $("#opt-samples").onchange = () => refreshEstimate();
 
 async function loadDefaults() {
   if (!S.type) return;
-  S.defaults = await api("/api/defaults", { json: { type: S.type, quality: S.quality } });
+  S.defaults = await api("/api/defaults", { json: { type: S.type, quality: S.quality, profile: S.profile } });
   const fam = selFamily(), d = S.defaults[fam];
   if (S.defFam !== fam) { $("#opt-samples").checked = d.samples; S.defFam = fam; }
   $$("[data-adv]").forEach((i) => {
@@ -313,8 +314,8 @@ async function loadDefaults() {
   });
   const rs = $("#res-select"), cur = rs.value;
   rs.innerHTML = `<option value="">${d.resolution} (conseillé)</option>` +
-    RES[fam].filter((r) => r !== d.resolution).map((r) => `<option value="${r}">${r}</option>`).join("");
-  rs.value = RES[fam].includes(+cur) && +cur !== d.resolution ? cur : "";
+    d.resolutions.filter((r) => r !== d.resolution).map((r) => `<option value="${r}">${r}</option>`).join("");
+  rs.value = d.resolutions.includes(+cur) && +cur !== d.resolution ? cur : "";
   $("#te-field").classList.toggle("hidden", fam !== "sd15");
   refreshEstimate();
 }
@@ -323,7 +324,7 @@ const refreshEstimate = debounce(async () => {
   if (!S.type) return;
   const adv = advValues();
   S.estimate = await api("/api/estimate", {
-    json: { n_images: S.images.length, type: S.type, quality: S.quality, overrides: { [selFamily()]: adv } },
+    json: { n_images: S.images.length, type: S.type, quality: S.quality, profile: S.profile, overrides: { [selFamily()]: adv } },
   });
   renderModels();
   updateSummary();
@@ -355,7 +356,7 @@ $("#launch-btn").onclick = async () => {
     const job = await api("/api/train", {
       json: {
         dataset: S.dataset, name: $("#f-name").value.trim(), trigger: $("#f-trigger").value.trim(),
-        type: S.type, quality: S.quality, model: S.model, advanced: advValues(),
+        type: S.type, quality: S.quality, model: S.model, profile: S.profile, advanced: advValues(),
         sample_prompts: $("#opt-prompts").value, auto_forge: $("#opt-forge").checked,
       },
     });
@@ -427,7 +428,7 @@ async function renderJob(j) {
   const r = runCache || {};
   const running = j.status === "running";
   $("#t-name").textContent = r.name || "";
-  $("#t-sub").textContent = `${S.types[r.type]?.label || ""} · ${r.model_name || ""} · ${QLABEL[r.quality] || ""} · mot-clé « ${r.trigger || ""} » · estimé ${fmtDur(r.estimate)}`;
+  $("#t-sub").textContent = `${S.types[r.type]?.label || ""} · ${r.model_name || ""} · ${QLABEL[r.quality] || ""} · ${profShort(r)} · mot-clé « ${r.trigger || ""} » · estimé ${fmtDur(r.estimate)}`;
   const phase = { finished: "Terminé ✓", cancelled: "Arrêté", error: "Échec" }[j.status] || j.phase;
   $("#t-phase").textContent = phase;
   $("#t-bar").style.width = j.status === "finished" ? "100%" : j.total ? `${(100 * j.step) / j.total}%` : "2%";
@@ -450,7 +451,7 @@ async function renderJob(j) {
 function renderRunStatic(r) {
   runCache = r;
   $("#t-name").textContent = r.name;
-  $("#t-sub").textContent = `${S.types[r.type]?.label || ""} · ${r.model_name} · ${QLABEL[r.quality]} · mot-clé « ${r.trigger} » · ${r.started.replace("T", " ")}`;
+  $("#t-sub").textContent = `${S.types[r.type]?.label || ""} · ${r.model_name} · ${QLABEL[r.quality]} · ${profShort(r)} · mot-clé « ${r.trigger} » · ${r.started.replace("T", " ")}`;
   $("#t-phase").textContent = { finished: "Terminé ✓", cancelled: "Arrêté", error: "Échec", interrupted: "Interrompu" }[r.status] || r.status;
   $("#t-bar").style.width = r.status === "finished" ? "100%" : "0";
   $("#t-step").textContent = r.params.steps;
@@ -501,7 +502,10 @@ $("#t-cancel").onclick = async () => {
   if (!confirm("Arrêter l'entraînement ? Les fichiers déjà sauvegardés sont gardés.")) return;
   await api("/api/job/cancel", { method: "POST" });
 };
-$("#t-folder").onclick = () => runCache && api("/api/open-folder", { json: { run: runCache.id } });
+// sur une machine sans écran (Linux distant), le dossier ne peut pas s'ouvrir : on affiche son chemin
+const openFolder = (body) => api("/api/open-folder", { json: body })
+  .then((r) => { if (!r.opened && r.path) toast("Dossier : " + r.path); }).catch((e) => toast(e.message, true));
+$("#t-folder").onclick = () => runCache && openFolder({ run: runCache.id });
 
 // ------------------------------------------------------------------ historique
 async function loadHistory() {
@@ -512,7 +516,7 @@ async function loadHistory() {
       <img class="ph" data-thumb="${esc(r.id)}" alt="">
       <div>
         <h3>${esc(r.name)} <span class="status ${r.status}">${{ finished: "terminé", running: "en cours", error: "échec", cancelled: "arrêté", interrupted: "interrompu" }[r.status] || r.status}</span></h3>
-        <div class="muted">${S.types[r.type]?.label || r.type} · ${esc(r.model_name)} · ${QLABEL[r.quality]} · « ${esc(r.trigger)} »</div>
+        <div class="muted">${S.types[r.type]?.label || r.type} · ${esc(r.model_name)} · ${QLABEL[r.quality]} · ${profShort(r)} · « ${esc(r.trigger)} »</div>
         <div class="muted">${r.started.slice(0, 16).replace("T", " à ")} · ${r.n_images} images · ${r.params.steps} pas · ${r.duration ? "durée " + fmtDur(r.duration) : "estimé " + fmtDur(r.estimate)}${r.forge ? " · dans Forge" : ""}</div>
       </div>
       <div class="acts">
@@ -535,10 +539,10 @@ $("#history").addEventListener("click", async (e) => {
   if (!b) return;
   const id = b.closest("[data-run]").dataset.run;
   if (b.dataset.act === "view") { S.viewRun = id; showView("train"); }
-  if (b.dataset.act === "folder") api("/api/open-folder", { json: { run: id } });
+  if (b.dataset.act === "folder") openFolder({ run: id });
   if (b.dataset.act === "again") reuseRun(await api(`/api/runs/${encodeURIComponent(id)}`));
 });
-$$("[data-open]").forEach((b) => (b.onclick = () => api("/api/open-folder", { json: { which: b.dataset.open } })));
+$$("[data-open]").forEach((b) => (b.onclick = () => openFolder({ which: b.dataset.open })));
 
 async function reuseRun(r) {
   $("#f-name").value = r.name;
@@ -573,18 +577,62 @@ $("#lightbox").onclick = () => $("#lightbox").classList.add("hidden");
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#lightbox").classList.add("hidden"); });
 
 // ------------------------------------------------------------------ démarrage
+// ------------------------------------------------------------------ carte graphique (popup au lancement)
+function openGpuModal(first) {
+  const info = S.info, g = info.gpus || [];
+  $("#gpu-detected").textContent = g.length
+    ? "Carte détectée : " + g.map((x) => `${x.name} (${x.vram_gb} Go)`).join(", ")
+    : "Aucune carte NVIDIA détectée (nvidia-smi introuvable).";
+  $("#gpu-cards").innerHTML = Object.entries(info.profiles).map(([k, p]) => `
+    <button data-profile="${k}" class="${k === S.profile ? "on" : ""}">
+      <span class="ico">${k === "big" ? "⚡" : "◐"}</span><b>${esc(p.label)}</b><small>${esc(p.desc)}</small>
+      ${k === info.recommended ? '<span class="badge xl">conseillé pour cette carte</span>' : ""}
+      ${k === "big" && g.length && Math.max(...g.map((x) => x.vram_gb)) < 16
+        ? `<span class="badge warn">trop juste pour ${Math.max(...g.map((x) => x.vram_gb))} Go : très lent</span>` : ""}
+    </button>`).join("");
+  S.gpuFirst = first;
+  $("#gpu-modal").classList.remove("hidden");
+}
+$("#gpu-cards").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-profile]");
+  if (!b) return;
+  await api("/api/profile", { json: { profile: b.dataset.profile } });
+  setProfile(b.dataset.profile);
+  $("#gpu-modal").classList.add("hidden");
+  if (S.gpuFirst) { S.gpuFirst = false; afterGpu(); }
+});
+$("#gpu-chip").onclick = () => openGpuModal(false);
+
+function setProfile(p) {
+  const changed = S.profile && S.profile !== p;
+  S.profile = p;
+  $("#gpu-chip").textContent = "GPU : " + S.info.profiles[p].short;
+  if (changed) $$("[data-adv]").forEach((i) => (i.value = "")); // les réglages avancés dépendent de la carte
+  S.defFam = null;
+  loadDefaults();
+}
+const profShort = (r) => S.info?.profiles[r.profile || "small"]?.short || "";
+
+function afterGpu() {
+  $("#f-type").textContent = "choisir…";
+  openTypeModal();
+  updateSummary();
+}
+
+// ------------------------------------------------------------------ démarrage
 (async function init() {
   const info = await api("/api/info");
+  S.info = info;
   S.types = info.types;
   S.quality = store.get("quality", "equilibre");
   $$("#quality button").forEach((x) => x.classList.toggle("on", x.dataset.q === S.quality));
   await Promise.all([loadDatasets(""), loadModels()]);
+  if (info.profile) setProfile(info.profile);
   S.job = await api("/api/job");
   if (S.job && S.job.status === "running") {
     startPolling();
     if (S.job.kind === "train") { S.viewRun = S.job.run_id; setType(store.get("type", "personnage")); showView("train"); return; }
   }
-  $("#f-type").textContent = "choisir…";
-  openTypeModal();
-  updateSummary();
+  if (!info.profile) openGpuModal(true); // 1er affichage depuis le lancement : on demande la carte
+  else afterGpu();
 })();

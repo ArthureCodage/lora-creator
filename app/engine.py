@@ -22,6 +22,8 @@ import toml
 from PIL import Image, ImageOps
 
 APP_DIR = Path(__file__).resolve().parent
+IS_WIN = os.name == "nt"
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WIN else {}  # pas de console qui clignote
 
 
 def _load_config() -> dict:
@@ -31,9 +33,12 @@ def _load_config() -> dict:
         shutil.copy(APP_DIR.parent / "config.example.json", path)
         print(f"  config.json créé depuis config.example.json — vérifie les chemins : {path}")
     cfg = json.loads(path.read_text(encoding="utf-8"))
-    expand = lambda s: os.path.expanduser(os.path.expandvars(s))
+    # « ~ » et %USERPROFILE% marchent sous Windows comme sous Linux
+    expand = lambda s: os.path.expanduser(os.path.expandvars(s.replace("%USERPROFILE%", "~")))
     for k in ("kohya_dir", "data_dir", "forge_lora_dir"):
         cfg[k] = expand(cfg[k])
+    if cfg.get("python"):
+        cfg["python"] = expand(cfg["python"])
     cfg["model_dirs"] = [expand(d) for d in cfg.get("model_dirs", [])]
     return cfg
 
@@ -42,7 +47,7 @@ CFG = _load_config()
 
 KOHYA = Path(CFG["kohya_dir"])
 SD_SCRIPTS = KOHYA / "sd-scripts"
-PYTHON = KOHYA / "venv" / "Scripts" / "python.exe"
+PYTHON = Path(CFG.get("python") or (KOHYA / "venv" / ("Scripts/python.exe" if IS_WIN else "bin/python")))
 DATA = Path(CFG["data_dir"])
 DATASETS = DATA / "datasets"
 RUNS = DATA / "runs"
@@ -86,28 +91,84 @@ DIM_ALPHA = {
 
 BASE_RES = {"sd15": 512, "sdxl": 1024}
 
-# Valeurs de départ pour une RTX 2060 6 Go ; remplacées par les mesures des vrais entraînements.
-DEFAULT_SPI = {"sd15": 0.6, "sdxl": 4.5}  # secondes par pas à la résolution de base
-DEFAULT_OVERHEAD = {"sd15": 90, "sdxl": 300}  # chargement du modèle + mise en cache
-SAMPLE_SEC = {"sd15": 5, "sdxl": 540}  # par image de test (SDXL déborde des 6 Go : très lent)
+# Profils de carte graphique, choisis au démarrage de l'appli.
+# Les temps sont des valeurs de départ, remplacées par les mesures des vrais entraînements (par profil).
+PROFILES = {
+    "small": {
+        "label": "Ma RTX 2060 (6 Go)",
+        "short": "RTX 2060",
+        "desc": "Économie de mémoire maximale : fp16, gradient checkpointing, SDXL en fp8, une image à la fois.",
+        "batch": {"sd15": 1, "sdxl": 1},
+        "unet_lr": {"sd15": 1e-4, "sdxl": 1e-4},
+        "te_lr": 5e-5,
+        "samples": {"sd15": True, "sdxl": False},  # en SDXL une image de test prend ~9 min sur 6 Go
+        "resolutions": {"sd15": [512, 640, 768], "sdxl": [768, 896, 1024]},
+        "spi": {"sd15": 0.6, "sdxl": 4.5},  # secondes par pas à la résolution de base
+        "overhead": {"sd15": 90, "sdxl": 300},  # chargement du modèle + mise en cache
+        "sample_sec": {"sd15": 5, "sdxl": 540},  # par image de test
+    },
+    "big": {
+        "label": "Gros GPU (24 Go et plus, ex. RTX 4090)",
+        "short": "Gros GPU",
+        "desc": "Vitesse maximale : bf16, sans économies de mémoire, plusieurs images à la fois, images de test partout.",
+        "batch": {"sd15": 4, "sdxl": 2},
+        "unet_lr": {"sd15": 2e-4, "sdxl": 1.5e-4},  # LR monté avec la taille de batch
+        "te_lr": 1e-4,
+        "samples": {"sd15": True, "sdxl": True},
+        "resolutions": {"sd15": [512, 640, 768], "sdxl": [768, 896, 1024, 1280]},
+        "spi": {"sd15": 0.35, "sdxl": 1.0},
+        "overhead": {"sd15": 60, "sdxl": 120},
+        "sample_sec": {"sd15": 2, "sdxl": 8},
+    },
+}
+DEFAULT_PROFILE = "small"
 
 
-def defaults_for(family: str, ltype: str, quality: str) -> dict:
+def prof(profile: str | None) -> dict:
+    return PROFILES.get(profile or DEFAULT_PROFILE, PROFILES[DEFAULT_PROFILE])
+
+
+def detect_gpus() -> list[dict]:
+    """Cartes NVIDIA vues par nvidia-smi (sans charger torch, qui garderait de la VRAM)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10, **_NO_WINDOW).stdout
+    except Exception:
+        return []
+    gpus = []
+    for line in out.strip().splitlines():
+        name, _, mem = line.rpartition(",")
+        try:
+            gpus.append({"name": name.strip(), "vram_gb": round(int(mem) / 1024)})
+        except ValueError:
+            pass
+    return gpus
+
+
+def recommended_profile(gpus: list[dict]) -> str:
+    return "big" if gpus and max(g["vram_gb"] for g in gpus) >= 16 else "small"
+
+
+def defaults_for(family: str, ltype: str, quality: str, profile: str | None = None) -> dict:
+    pr = prof(profile)
     dim, alpha = DIM_ALPHA[family][ltype]
     return {
         "epochs": QUALITY_EPOCHS[quality],
         "target_steps": TARGET_STEPS[family][ltype][quality],
         "dim": dim,
         "alpha": alpha,
-        "unet_lr": 1e-4,
-        "te_lr": 5e-5 if family == "sd15" else 0.0,
+        "unet_lr": pr["unet_lr"][family],
+        "te_lr": pr["te_lr"] if family == "sd15" else 0.0,
         "resolution": BASE_RES[family],
+        "resolutions": pr["resolutions"][family],
+        "batch": pr["batch"][family],
         "seed": 1234,
-        "samples": family == "sd15",  # en SDXL les images de test prennent ~9 min chacune
+        "samples": pr["samples"][family],
     }
 
 
-def plan_steps(n_images: int, target: int, epochs: int, repeats: int | None = None) -> dict:
+def plan_steps(n_images: int, target: int, epochs: int, repeats: int | None = None, batch: int = 1) -> dict:
+    """target = nombre d'images vues visé (équivalent pas à batch 1) ; les pas réels sont divisés par le batch."""
     n = max(1, n_images)
     if not repeats:
         repeats = max(1, round(target / (n * epochs)))
@@ -115,7 +176,8 @@ def plan_steps(n_images: int, target: int, epochs: int, repeats: int | None = No
             epochs = max(3, round(target / n))
         repeats = min(repeats, 50)
     save_every = max(1, round(epochs / 5))
-    return {"repeats": repeats, "epochs": epochs, "steps": n * repeats * epochs, "save_every": save_every}
+    steps = -(-n * repeats // max(1, batch)) * epochs
+    return {"repeats": repeats, "epochs": epochs, "steps": steps, "batch": batch, "save_every": save_every}
 
 
 # --------------------------------------------------------------------------- modèles
@@ -173,13 +235,17 @@ def list_models() -> list[dict]:
 
 # --------------------------------------------------------------------------- estimation du temps
 
-def _calibration() -> dict:
-    """s/it et frais fixes mesurés sur les entraînements terminés (médiane des 5 derniers)."""
+def _calibration(profile: str | None) -> dict:
+    """s/pas et frais fixes mesurés sur les entraînements terminés de ce profil (médiane des 5 derniers)."""
+    profile = profile or DEFAULT_PROFILE
+    pr = prof(profile)
     spi: dict[str, list] = {"sd15": [], "sdxl": []}
     ovh: dict[str, list] = {"sd15": [], "sdxl": []}
     for r in list_runs():
         m = r.get("measured")
         if r.get("status") != "finished" or not m or not m.get("reliable") or r.get("family") not in spi:
+            continue
+        if r.get("profile", "small") != profile or r["params"].get("batch", 1) != pr["batch"][r["family"]]:
             continue
         fam = r["family"]
         res = r["params"]["resolution"]
@@ -188,27 +254,34 @@ def _calibration() -> dict:
     cal = {}
     for fam in spi:
         cal[fam] = {
-            "spi": statistics.median(spi[fam][:5]) if spi[fam] else DEFAULT_SPI[fam],
-            "overhead": statistics.median(ovh[fam][:5]) if ovh[fam] else DEFAULT_OVERHEAD[fam],
+            "spi": statistics.median(spi[fam][:5]) if spi[fam] else pr["spi"][fam],
+            "overhead": statistics.median(ovh[fam][:5]) if ovh[fam] else pr["overhead"][fam],
             "calibrated": bool(spi[fam]),
             "runs": len(spi[fam]),
         }
     return cal
 
 
-def estimate(n_images: int, ltype: str, quality: str, overrides: dict | None = None) -> dict:
-    cal = _calibration()
+def _params(fam: str, ltype: str, quality: str, profile: str | None, adv: dict) -> tuple[dict, dict]:
+    p = defaults_for(fam, ltype, quality, profile)
+    ov = {k: v for k, v in (adv or {}).items() if v not in (None, "")}
+    p.update(ov)
+    return p, ov
+
+
+def estimate(n_images: int, ltype: str, quality: str, overrides: dict | None = None, profile: str | None = None) -> dict:
+    cal = _calibration(profile)
+    pr = prof(profile)
     result = {}
     for fam in ("sd15", "sdxl"):
-        p = defaults_for(fam, ltype, quality)
-        ov = {k: v for k, v in (overrides or {}).get(fam, {}).items() if v not in (None, "")}
-        p.update(ov)
-        plan = plan_steps(n_images, p["target_steps"], int(p["epochs"]), int(ov.get("repeats") or 0) or None)
+        p, ov = _params(fam, ltype, quality, profile, (overrides or {}).get(fam, {}))
+        plan = plan_steps(n_images, int(p["target_steps"]), int(p["epochs"]), int(ov.get("repeats") or 0) or None,
+                          int(p["batch"]))
         res = int(p["resolution"])
         spi = cal[fam]["spi"] * (res / BASE_RES[fam]) ** 2
         n_prompts = 2 if fam == "sd15" else 1
         sample_events = plan["epochs"] // plan["save_every"] if p["samples"] else 0
-        seconds = cal[fam]["overhead"] + plan["steps"] * spi + sample_events * n_prompts * SAMPLE_SEC[fam]
+        seconds = cal[fam]["overhead"] + plan["steps"] * spi + sample_events * n_prompts * pr["sample_sec"][fam]
         result[fam] = {**plan, "seconds": round(seconds), "calibrated": cal[fam]["calibrated"], "params": p}
     return result
 
@@ -427,9 +500,12 @@ class Job:
         env = os.environ.copy()
         env.update({"COLUMNS": "160", "TF_CPP_MIN_LOG_LEVEL": "2", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
                     "PATH": str(PYTHON.parent) + os.pathsep + env.get("PATH", "")})
+        # processus dans son propre groupe, pour pouvoir l'arrêter avec tous ses enfants
+        group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if IS_WIN
+                 else {"start_new_session": True})
         self.proc = subprocess.Popen(
             self.cmd, cwd=str(SD_SCRIPTS), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+            stdin=subprocess.DEVNULL, **group)
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -511,8 +587,17 @@ class Job:
     def cancel(self):
         if self.proc and self.proc.poll() is None:
             self.cancelled = True
-            subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
-                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if IS_WIN:
+                subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"], capture_output=True, **_NO_WINDOW)
+            else:
+                import signal
+                try:
+                    os.killpg(self.proc.pid, signal.SIGTERM)
+                    self.proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def state(self) -> dict:
         now = self.ended or time.time()
@@ -626,10 +711,11 @@ def start_training(req: dict) -> Job:
     name = slugify(req["name"])
     trigger = req["trigger"].strip() or name.lower()
 
-    adv = {k: v for k, v in (req.get("advanced") or {}).items() if v not in (None, "")}
-    p = defaults_for(fam, ltype, quality)
-    p.update(adv)
-    plan = plan_steps(len(imgs), int(p["target_steps"]), int(p["epochs"]), int(adv.get("repeats") or 0) or None)
+    profile = req.get("profile") if req.get("profile") in PROFILES else DEFAULT_PROFILE
+    big = profile == "big"
+    p, adv = _params(fam, ltype, quality, profile, req.get("advanced") or {})
+    batch = int(p["batch"])
+    plan = plan_steps(len(imgs), int(p["target_steps"]), int(p["epochs"]), int(adv.get("repeats") or 0) or None, batch)
     res = int(p["resolution"])
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + name[:30]
@@ -656,7 +742,7 @@ def start_training(req: dict) -> Job:
     if fam == "sd15":
         general.update({"shuffle_caption": True, "keep_tokens": 1})
     dataset_cfg = {"general": general,
-                   "datasets": [{"resolution": [res, res], "batch_size": 1, "subsets": [subset]}]}
+                   "datasets": [{"resolution": [res, res], "batch_size": batch, "subsets": [subset]}]}
     (rdir / "dataset.toml").write_text(toml.dumps(dataset_cfg), encoding="utf-8")
 
     args = {
@@ -675,14 +761,15 @@ def start_training(req: dict) -> Job:
         "lr_scheduler_num_cycles": 1,
         "max_train_epochs": plan["epochs"],
         "save_every_n_epochs": plan["save_every"],
-        "mixed_precision": "fp16",
+        # petite carte : tout pour économiser la VRAM ; gros GPU : bf16 et pas d'économies qui ralentissent
+        "mixed_precision": "bf16" if big else "fp16",
         "save_precision": "fp16",
-        "gradient_checkpointing": True,
-        "xformers": True,
+        "gradient_checkpointing": not big,
+        ("sdpa" if big else "xformers"): True,
         "cache_latents": True,
         "cache_latents_to_disk": True,
         "seed": int(p["seed"]),
-        "max_data_loader_n_workers": 1,
+        "max_data_loader_n_workers": 2 if big else 1,
         "persistent_data_loader_workers": True,
         "min_snr_gamma": 5,
         "noise_offset": 0.05 if fam == "sd15" else 0.0357,
@@ -694,7 +781,9 @@ def start_training(req: dict) -> Job:
             args["network_train_unet_only"] = True
     else:
         args.update({"network_train_unet_only": True, "cache_text_encoder_outputs": True,
-                     "cache_text_encoder_outputs_to_disk": True, "no_half_vae": True, "fp8_base": True})
+                     "cache_text_encoder_outputs_to_disk": True, "no_half_vae": True})
+        if not big:
+            args["fp8_base"] = True  # le modèle SDXL ne tient dans 6 Go qu'en fp8
     if p["samples"]:
         args.update({"sample_prompts": str(rdir / "prompts.txt"), "sample_every_n_epochs": plan["save_every"],
                      "sample_sampler": "euler_a"})
@@ -703,9 +792,9 @@ def start_training(req: dict) -> Job:
     run = {
         "id": run_id, "name": name, "trigger": trigger, "type": ltype, "quality": quality,
         "family": fam, "model": model["path"], "model_name": model["name"], "pony": model["pony"],
-        "dataset": req["dataset"], "n_images": len(imgs), "params": {**p, **plan},
+        "profile": profile, "dataset": req["dataset"], "n_images": len(imgs), "params": {**p, **plan},
         "advanced": adv, "sample_prompts": req.get("sample_prompts") or "", "auto_forge": bool(req.get("auto_forge", True)),
-        "estimate": estimate(len(imgs), ltype, quality, {fam: adv})[fam]["seconds"],
+        "estimate": estimate(len(imgs), ltype, quality, {fam: adv}, profile)[fam]["seconds"],
         "status": "running", "started": _now(), "ended": None, "duration": None,
     }
     _write_json(rdir / "run.json", run)
@@ -727,12 +816,14 @@ def _finish_training(job: Job) -> None:
         n_samples = len(list((out / "sample").glob("*.png"))) if (out / "sample").is_dir() else 0
         steps = max(1, job.total or run["params"]["steps"])
         train_sec = (job.rate or 0) * steps  # compteur de kohya : pas + images de test
-        spi = max(0.05, (train_sec - n_samples * SAMPLE_SEC[run["family"]]) / steps)
+        sample_sec = prof(run.get("profile"))["sample_sec"][run["family"]]
+        spi = max(0.05, (train_sec - n_samples * sample_sec) / steps)
         run["measured"] = {
             "spi": round(spi, 3),
             "overhead": round(max(0, (job.ended - job.started) - train_sec)),
             "samples": n_samples,
-            "reliable": steps >= 200,  # les tout petits essais faussent l'estimation
+            # les tout petits essais faussent l'estimation
+            "reliable": steps * run["params"].get("batch", 1) >= 200,
         }
         final = out / f"{run['name']}.safetensors"
         if final.exists():

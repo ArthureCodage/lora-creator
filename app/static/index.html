@@ -14,6 +14,7 @@
     <button class="tab" data-view="train">Entraînement <span id="tab-dot" class="dot hidden"></span></button>
     <button class="tab" data-view="history">Historique</button>
   </nav>
+  <button id="gpu-chip" class="chip gpu" title="Changer de carte graphique">GPU…</button>
 </header>
 
 <main>
@@ -104,7 +105,7 @@
           <textarea id="opt-prompts" rows="3" placeholder="automatique selon le type et le mot-clé"></textarea>
         </label>
       </details>
-      <label class="check"><input type="checkbox" id="opt-forge" checked> Copier le LoRA fini dans Forge Neo (avec aperçu et mot-clé)</label>
+      <label class="check"><input type="checkbox" id="opt-forge" checked> Copier le LoRA fini dans Forge (avec aperçu et mot-clé)</label>
     </div>
 
     <div class="launch">
@@ -174,6 +175,15 @@
       <button data-type="style"><span class="ico">✎</span><b>Style artistique</b><small>un rendu, une technique, une ambiance</small></button>
       <button data-type="objet"><span class="ico">◈</span><b>Objet / concept</b><small>un vêtement, un objet, une pose, un lieu</small></button>
     </div>
+  </div>
+</div>
+
+<!-- popup carte graphique (au lancement de l'appli) -->
+<div id="gpu-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Sur quelle carte graphique ?</h2>
+    <p class="modal-sub" id="gpu-detected"></p>
+    <div class="type-cards gpu-cards" id="gpu-cards"></div>
   </div>
 </div>
 

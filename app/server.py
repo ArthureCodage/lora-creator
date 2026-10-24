@@ -1,4 +1,5 @@
-"""Serveur web local de LoRA Creator. Lancé par « Lancer LoRA Creator.bat » avec le Python de kohya."""
+"""Serveur web local de LoRA Creator. Lancé par « Lancer LoRA Creator.bat » (Windows) ou lancer-lora-creator.sh
+(Linux) avec le Python de kohya."""
 
 import sys
 import threading
@@ -25,9 +26,32 @@ def guard(fn, *a, **kw):
 
 # ------------------------------------------------------------------ infos générales
 
+# Profil de carte choisi dans le popup : demandé à chaque lancement de l'appli (pas à chaque rechargement de page).
+SESSION = {"profile": None, "gpus": None}
+
+
 @app.get("/api/info")
 def info():
-    return {"types": E.TYPES, "data_dir": str(E.DATA), "forge_dir": str(E.FORGE_LORA)}
+    if SESSION["gpus"] is None:
+        SESSION["gpus"] = E.detect_gpus()
+    return {
+        "types": E.TYPES, "data_dir": str(E.DATA), "forge_dir": str(E.FORGE_LORA),
+        "profiles": {k: {f: v[f] for f in ("label", "short", "desc")} for k, v in E.PROFILES.items()},
+        "profile": SESSION["profile"], "gpus": SESSION["gpus"],
+        "recommended": E.recommended_profile(SESSION["gpus"]),
+    }
+
+
+@app.post("/api/profile")
+def set_profile(body: dict = Body(...)):
+    if body.get("profile") not in E.PROFILES:
+        raise HTTPException(400, "Profil inconnu.")
+    SESSION["profile"] = body["profile"]
+    return {"profile": SESSION["profile"]}
+
+
+def _profile(body: dict) -> str | None:
+    return body.get("profile") or SESSION["profile"]
 
 
 @app.get("/api/models")
@@ -37,12 +61,13 @@ def models():
 
 @app.post("/api/estimate")
 def estimate(body: dict = Body(...)):
-    return E.estimate(int(body.get("n_images") or 0), body["type"], body["quality"], body.get("overrides"))
+    return E.estimate(int(body.get("n_images") or 0), body["type"], body["quality"], body.get("overrides"),
+                      _profile(body))
 
 
 @app.post("/api/defaults")
 def defaults(body: dict = Body(...)):
-    return {f: E.defaults_for(f, body["type"], body["quality"]) for f in ("sd15", "sdxl")}
+    return {f: E.defaults_for(f, body["type"], body["quality"], _profile(body)) for f in ("sd15", "sdxl")}
 
 
 # ------------------------------------------------------------------ datasets
@@ -111,7 +136,7 @@ def dataset_file(slug: str, fname: str, thumb: int = 0):
 
 @app.post("/api/train")
 def train(body: dict = Body(...)):
-    return guard(E.start_training, body).state()
+    return guard(E.start_training, {**body, "profile": _profile(body)}).state()
 
 
 @app.get("/api/job")
@@ -155,22 +180,40 @@ def run_file(run_id: str, kind: str, fname: str, thumb: int = 0):
 
 @app.post("/api/open-folder")
 def open_folder(body: dict = Body(...)):
+    """Ouvre le dossier dans l'explorateur. Sur une machine sans écran (serveur, cloud), renvoie juste le chemin."""
     import os
+    import shutil
+    import subprocess
     target = {"data": E.DATA, "lora": E.LORA_OUT, "forge": E.FORGE_LORA}.get(body.get("which"))
     if body.get("run"):
         target = guard(E._run_dir, body["run"]) / "output"
+    opened = False
     if target and Path(target).exists():
-        os.startfile(target)
-    return {"ok": True}
+        if E.IS_WIN:
+            os.startfile(target)
+            opened = True
+        elif shutil.which("xdg-open") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            subprocess.Popen(["xdg-open", str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            opened = True
+    return {"ok": True, "opened": opened, "path": str(target) if target else None}
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
 
 
+def _arg(name: str, default):
+    """--host 0.0.0.0 / --port 7870 en ligne de commande (prioritaires sur config.json)."""
+    if name in sys.argv and sys.argv.index(name) + 1 < len(sys.argv):
+        return sys.argv[sys.argv.index(name) + 1]
+    return default
+
+
 if __name__ == "__main__":
-    port = int(E.CFG.get("port", 7870))
+    host = _arg("--host", E.CFG.get("host", "127.0.0.1"))
+    port = int(_arg("--port", E.CFG.get("port", 7870)))
     url = f"http://127.0.0.1:{port}"
-    print(f"\n  LoRA Creator : {url}\n  (ferme cette fenêtre pour arrêter l'appli)\n")
+    print(f"\n  LoRA Creator : {url}" + (f"  (écoute sur {host})" if host != "127.0.0.1" else "") +
+          "\n  (ferme cette fenêtre ou Ctrl+C pour arrêter l'appli)\n")
     if "--no-browser" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
