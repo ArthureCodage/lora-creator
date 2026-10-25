@@ -16,6 +16,27 @@ Deux profils de carte au choix : petite carte (testée sur une RTX 2060 6 Go) ou
 
 </div>
 
+<details>
+<summary><b>🇬🇧 English summary</b></summary>
+
+**LoRA Creator** is a minimal web UI that drives [kohya_ss](https://github.com/bmaltais/kohya_ss) sd-scripts
+so you don't have to set 25 parameters for every LoRA. *(The interface is in French for now.)*
+
+- Pick your GPU profile at launch: **small card (6–8 GB, tested on an RTX 2060)** or **big GPU (24 GB+)**.
+  Precision, memory savings, batch size and learning rates follow automatically.
+- Pick a LoRA type (character / style / object), drop your images, click **auto captions** (WD14 tags on GPU or BLIP),
+  choose a checkpoint (**SD 1.5, SDXL, Pony**) and a quality level (Fast / Balanced / Quality) → **Start**.
+- Training time is estimated before you start, then recalibrated from your real runs.
+- Live progress, loss, sample images, per-epoch files, full history with **re-run with same settings**.
+- Finished LoRAs are copied to Forge / A1111 `models/Lora` with a preview and trigger word, never overwriting anything.
+
+**Install:** have kohya_ss installed (tested with v26), `git clone https://github.com/ArthureCodage/lora-creator.git`,
+then run `Lancer LoRA Creator.bat` (Windows) or `./lancer-lora-creator.sh` (Linux). Nothing else to install.
+
+Want it in the cloud? **[DonoGenSoft](https://github.com/ArthureCodage/DonoGenSoft)** installs kohya_ss + LoRA Creator + Forge Neo on vast.ai / RunPod in one command.
+
+</details>
+
 ---
 
 ## Pourquoi ?
